@@ -18,6 +18,9 @@ use namada_sdk::{
 use std::str::FromStr;
 use tendermint_rpc::Client;
 
+/// Upper bound on in-flight per-validator queries when refreshing the set.
+const MAX_CONCURRENT_VALIDATOR_QUERIES: usize = 30;
+
 pub struct Rpc {
     client: OwnClient,
 }
@@ -36,7 +39,12 @@ impl Rpc {
             let code = self
                 .query_tx_code_hash(&code_path, height)
                 .await?
-                .unwrap_or_else(|| panic!("{} must be defined in namada storage.", code_path));
+                .with_context(|| {
+                    format!(
+                        "{} must be defined in namada storage at height {}",
+                        code_path, height
+                    )
+                })?;
             checksums.add(code_path, code);
         }
         Ok(checksums)
@@ -89,7 +97,8 @@ impl Rpc {
         checksums: &Checksums,
         epoch: Epoch,
     ) -> anyhow::Result<Block> {
-        let block_height = TenderHeight::try_from(block_height).unwrap();
+        let block_height = TenderHeight::try_from(block_height)
+            .with_context(|| format!("Invalid block height: {}", block_height))?;
 
         let events_res = self.client.as_ref().block_results(block_height).await;
         let events = events_res.map(BlockResult::from).context(format!(
@@ -135,7 +144,7 @@ impl Rpc {
     pub async fn query_validators(&self, epoch: Epoch) -> anyhow::Result<Vec<Validator>> {
         let res = rpc::get_all_validators(self.client.as_ref(), NamadaEpoch(epoch)).await;
 
-        let validators = res.context("Should be able to query native token")?;
+        let validators = res.context("Should be able to query the validator set")?;
         let results: Vec<Result<Validator, anyhow::Error>> =
             futures::stream::iter(validators.into_iter().map(|validator_address| async move {
                 let voting_power = self.query_stake(&validator_address, epoch).await?;
@@ -148,19 +157,16 @@ impl Rpc {
                     state,
                 })
             }))
-            .buffer_unordered(30) // max 10 concurrent
+            .buffer_unordered(MAX_CONCURRENT_VALIDATOR_QUERIES)
             .collect()
             .await;
 
-        let validators = results
+        // A partial validator set silently corrupts every voting-power check,
+        // so fail the whole block instead and let the retry loop try again.
+        results
             .into_iter()
-            .map(|res| {
-                res.context("context: Should be able to query validator")
-                    .unwrap()
-            })
-            .collect();
-
-        Ok(validators)
+            .collect::<Result<Vec<_>, _>>()
+            .context("Should be able to query every validator")
     }
 
     pub async fn query_native_token(&self) -> anyhow::Result<Address> {
@@ -168,22 +174,6 @@ impl Rpc {
 
         res.context("Should be able to query native token")
             .map(|address| address.to_string())
-    }
-
-    pub async fn query_total_supply(&self, native_token: &str) -> anyhow::Result<u64> {
-        let address = NamadaAddress::from_str(native_token)
-            .context("Should be able to convert string to address")?;
-        let res = rpc::get_token_total_supply(self.client.as_ref(), &address).await;
-
-        res.context("Should be able to query native token")
-            .map(|amount| amount.raw_amount().as_u64())
-    }
-
-    pub async fn query_max_block_time_estimate(&self) -> anyhow::Result<u64> {
-        let res = rpc::query_max_block_time_estimate(self.client.as_ref()).await;
-
-        res.context("Should be able to query max block time estimate")
-            .map(|amount| amount.0)
     }
 
     pub async fn query_future_bonds_and_unbonds(&self, epoch: Epoch) -> anyhow::Result<(u64, u64)> {
@@ -205,23 +195,6 @@ impl Rpc {
                         .unwrap_or(0),
                 )
             })
-    }
-
-    pub async fn read_storage_at_height(
-        &self,
-        key: &Key,
-        height: Height,
-    ) -> anyhow::Result<Option<Vec<u8>>> {
-        let res =
-            rpc::query_storage_value_bytes(self.client.as_ref(), key, Some(height.into()), false)
-                .await;
-
-        let result = res.context("Should be able to query storage at height");
-        match result {
-            Ok((Some(value), _)) => Ok(Some(value)),
-            Ok((None, _)) => Err(anyhow::anyhow!("Error querying storage: {:?}", key)),
-            Err(e) => Err(anyhow::anyhow!("Error querying storage: {:?}", e)),
-        }
     }
 
     pub async fn query_native_token_supply(&self, token: &str) -> anyhow::Result<Supply> {

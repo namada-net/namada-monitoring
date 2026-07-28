@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use crate::{log::LogConfig, shared::config::Config};
 
 #[derive(clap::Parser)]
@@ -23,11 +25,12 @@ pub struct AppConfig {
     #[clap(long, env, default_value_t = 3)]
     pub sleep_for: u64,
 
-    #[clap(long, env, default_value_t = true)]
-    pub dry_run: bool,
-
     #[clap(flatten)]
     pub log: LogConfig,
+
+    /// Parsed `config_path`, read from disk once on first access.
+    #[clap(skip)]
+    config: OnceLock<Config>,
 }
 
 fn file_exists(path: &str) -> Result<String, String> {
@@ -39,8 +42,20 @@ fn file_exists(path: &str) -> Result<String, String> {
 }
 
 impl AppConfig {
-    pub fn get_config(&self) -> Config {
-        toml::de::from_str(&std::fs::read_to_string(&self.config_path).unwrap())
-            .expect("Failed to parse config file")
+    /// The toml configuration. Parsed on first call and cached: this is read
+    /// from every check and metric constructor, and re-reading the file each
+    /// time also meant the process could pick up a half-written config.
+    pub fn get_config(&self) -> &Config {
+        self.config.get_or_init(|| {
+            let raw = std::fs::read_to_string(&self.config_path).unwrap_or_else(|err| {
+                panic!("Failed to read config file '{}': {}", self.config_path, err)
+            });
+            toml::de::from_str(&raw).unwrap_or_else(|err| {
+                panic!(
+                    "Failed to parse config file '{}': {}",
+                    self.config_path, err
+                )
+            })
+        })
     }
 }

@@ -1,13 +1,17 @@
 mod block;
 mod fees;
 mod gas;
+mod governance;
 mod halt;
 mod ibc;
 mod ibc_limit;
+mod lag;
 mod pos;
 mod slashes;
 mod transfer_limit;
 mod tx;
+mod unknown_tx;
+mod validator_state;
 
 use std::fmt::Display;
 
@@ -17,9 +21,10 @@ pub use crate::config::AppConfig;
 pub use crate::state::State;
 use crate::{
     checks::{
-        block::BlockCheck, fees::FeeCheck, gas::GasCheck, halt::HaltCheck, ibc::IbcCheck,
-        ibc_limit::IbcLimitCheck, pos::PoSCheck, slashes::SlashCheck,
-        transfer_limit::TransferLimitCheck, tx::TxCheck,
+        block::BlockCheck, fees::FeeCheck, gas::GasCheck, governance::GovernanceCheck,
+        halt::HaltCheck, ibc::IbcCheck, ibc_limit::IbcLimitCheck, lag::LagCheck, pos::PoSCheck,
+        slashes::SlashCheck, transfer_limit::TransferLimitCheck, tx::TxCheck,
+        unknown_tx::UnknownTxCheck, validator_state::ValidatorStateCheck,
     },
     shared::alert::Alert,
 };
@@ -36,18 +41,36 @@ pub struct CheckManager {
 
 impl CheckManager {
     pub fn new(config: &AppConfig) -> Self {
-        let checks: Vec<Box<dyn CheckTrait>> = vec![
-            Box::new(FeeCheck::new(config)),
-            Box::new(BlockCheck::new(config)),
-            Box::new(PoSCheck::new(config)),
-            Box::new(TxCheck::new(config)),
-            Box::new(HaltCheck::new(config)),
-            Box::new(GasCheck::new(config)),
-            Box::new(IbcCheck::new(config)),
-            Box::new(TransferLimitCheck::new(config)),
-            Box::new(SlashCheck::default()),
-            Box::new(IbcLimitCheck::default()),
-        ];
+        let enabled = &config.get_config().checks;
+        let mut checks: Vec<Box<dyn CheckTrait>> = Vec::new();
+
+        // Each entry is built lazily so a disabled check does not pay for its
+        // construction, which for some of them means an RPC client.
+        let mut register = |is_enabled: bool, build: &dyn Fn() -> Box<dyn CheckTrait>| {
+            if is_enabled {
+                checks.push(build());
+            }
+        };
+
+        register(enabled.fee, &|| Box::new(FeeCheck::new(config)));
+        register(enabled.block, &|| Box::new(BlockCheck::new(config)));
+        register(enabled.pos, &|| Box::new(PoSCheck::new(config)));
+        register(enabled.tx, &|| Box::new(TxCheck::new(config)));
+        register(enabled.halt, &|| Box::new(HaltCheck::new(config)));
+        register(enabled.gas, &|| Box::new(GasCheck::new(config)));
+        register(enabled.ibc, &|| Box::new(IbcCheck::new(config)));
+        register(enabled.transfer_limit, &|| {
+            Box::new(TransferLimitCheck::new(config))
+        });
+        register(enabled.slashes, &|| Box::new(SlashCheck::default()));
+        register(enabled.ibc_limit, &|| Box::new(IbcLimitCheck::new(config)));
+        register(enabled.lag, &|| Box::new(LagCheck::new(config)));
+        register(enabled.validator_state, &|| {
+            Box::new(ValidatorStateCheck::default())
+        });
+        register(enabled.governance, &|| Box::new(GovernanceCheck::default()));
+        register(enabled.unknown_tx, &|| Box::new(UnknownTxCheck::default()));
+
         Self { checks }
     }
 

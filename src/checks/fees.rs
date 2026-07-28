@@ -1,13 +1,17 @@
 use crate::{
     constants::MICRO,
-    shared::alert::{Alert, Metadata, Severity},
+    shared::alert::{summarize, Alert, Metadata, Severity},
     state::State,
 };
 
 use super::{AppConfig, CheckTrait};
-use std::{collections::HashMap, fmt::Display};
+use std::{collections::HashMap, fmt::Display, time::Duration};
 
 const FEE_CHECK_ID: &str = "fee_check";
+
+/// A busy chain can have over-paying transactions in every block. Report the
+/// offenders of one block together, then stay quiet for a while.
+const DAMPENING: Duration = Duration::from_secs(60 * 15);
 
 #[derive(Debug, Clone)]
 struct DefaultFeeThreshold {
@@ -45,37 +49,47 @@ impl FeeCheck {
 #[async_trait::async_trait]
 impl CheckTrait for FeeCheck {
     async fn check(&self, state: &State) -> Vec<Alert> {
-        let last_state = state.last_block();
+        let Some(last_state) = state.last_block() else {
+            return Vec::new();
+        };
 
-        last_state.block.transactions.iter().filter_map(|tx| {
-            let tx_id = tx.id.clone();
-            let fee_token = tx.fee.gas_token.clone();
-            let fee = tx.compute_fee();
+        let offenders = last_state
+            .block
+            .transactions
+            .iter()
+            .filter_map(|tx| {
+                let threshold = self.thresholds.get(&tx.fee.gas_token)?;
+                let fee = tx.compute_fee();
 
-            match self.thresholds.get(&fee_token) {
-                Some(threshold) => {
-                    if threshold.value >= fee {
-                        None
-                    } else {
-                        let title = "Fee too high".to_string();
-                        let description = format!("The transaction *{}* paid a fee of *{}* _{}_, which is above the threshold of *{}* _{}_.", tx_id, fee, threshold.name, threshold.value, threshold.name);
-                        Some(Alert {
-                            check_id: FEE_CHECK_ID.to_string(),
-                            title,
-                            description,
-                            metadata: Metadata::new(
-                                Some(last_state.block.block.header.height.value() as u32),
-                                Some(tx_id.clone()),
-                            ),
-                            severity: Severity::Low,
-                            trigger_after: None,
-                            continous: self.is_continous(),
-                        })
-                    }
-                },
-                None => None,
-            }
-        }).collect::<Vec<_>>()
+                if fee <= threshold.value {
+                    return None;
+                }
+
+                Some(format!(
+                    "{} paid {} {} (threshold {})",
+                    tx.id, fee, threshold.name, threshold.value
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        if offenders.is_empty() {
+            return Vec::new();
+        }
+
+        vec![Alert {
+            check_id: FEE_CHECK_ID.to_string(),
+            title: "Fee too high".to_string(),
+            description: format!(
+                "*{}* transactions in block {} paid a fee above the configured threshold:{}",
+                offenders.len(),
+                last_state.block.height,
+                summarize(&offenders)
+            ),
+            metadata: Metadata::new(Some(last_state.block.height as u32), None),
+            severity: Severity::Low,
+            trigger_after: Some(DAMPENING),
+            continous: self.is_continous(),
+        }]
     }
 
     fn is_continous(&self) -> bool {

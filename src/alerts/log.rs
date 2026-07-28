@@ -46,10 +46,6 @@ impl AlertTrait for Log {
         Ok(())
     }
 
-    fn get_block_explorer(&self) -> BlockExplorer {
-        self.block_explorer.clone()
-    }
-
     fn get_id(&self) -> String {
         "log".to_string()
     }

@@ -24,23 +24,15 @@ pub type Epoch = u64;
 pub type TxId = String;
 pub type Address = String;
 
+/// Internal address of the multi-asset shielded pool.
+pub const MASP_ADDRESS: namada_sdk::address::Address =
+    namada_sdk::address::Address::Internal(namada_sdk::address::InternalAddress::Masp);
+
 #[derive(Clone, Debug)]
 pub struct Validator {
     pub address: String,
     pub voting_power: u64,
     pub state: ValidatorState,
-}
-
-impl Validator {
-    pub fn get_validator_state(&self) -> String {
-        match self.state {
-            ValidatorState::Consensus => "consensus".to_string(),
-            ValidatorState::BelowCapacity => "below_capacity".to_string(),
-            ValidatorState::BelowThreshold => "below_threshold".to_string(),
-            ValidatorState::Inactive => "inactive".to_string(),
-            ValidatorState::Jailed => "jailed".to_string(),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -71,10 +63,6 @@ impl Wrapper {
             .parse::<f64>()
             .unwrap_or_default();
         gas_limit * amount_per_gas
-    }
-
-    pub fn get_gas_used(&self) -> f64 {
-        self.fee.gas_used as f64
     }
 
     pub fn is_successful(&self) -> bool {
@@ -430,115 +418,92 @@ impl Block {
         }
     }
 
-    pub fn count_inners(&self) -> u64 {
-        self.transactions
-            .iter()
-            .map(|tx| tx.inners.len())
-            .sum::<usize>() as u64
-    }
-
-    // pub fn get_all_ibc_client(&self) -> Vec<IbcClient> {
-    //     let mut ibc_clients = vec![];
-    //     for tx in self
-    //         .transactions
-    //         .iter()
-    //         .filter(|tx| tx.status.was_applied())
-    //         .cloned()
-    //         .collect::<Vec<Wrapper>>()
-    //     {
-    //         for inner in tx
-    //             .inners
-    //             .iter()
-    //             .filter(|tx| tx.was_applied)
-    //             .cloned()
-    //             .collect::<Vec<Inner>>()
-    //         {
-    //             match &inner.kind {
-    //                 InnerKind::IbcMsgTransfer(IbcMessage::Envelope(msg_envelope)) => {
-    //                     match &**msg_envelope {
-    //                         MsgEnvelope::Client(client_msg) => match client_msg {
-    //                             ClientMsg::UpdateClient(msg_update_client) => {
-    //                                 let client = IbcClient {
-    //                                     client_id: msg_update_client.client_id.to_string(),
-    //                                 };
-    //                             }
-    //                             _ => ()
-    //                         },
-    //                         _ => (),
-    //                     }
-    //                 }
-    //                 _ => (),
-    //             }
-    //         }
-    //     }
-
-    //     ibc_clients
-    // }
-
+    /// Every token movement carried by the applied transactions of this block,
+    /// aggregated per (inner transaction, token).
     pub fn get_all_transfers(&self) -> Vec<Transfer> {
         let mut transfers = Vec::new();
-        for tx in self
+
+        let applied_inners = self
             .transactions
             .iter()
             .filter(|tx| tx.status.was_applied())
-            .cloned()
-            .collect::<Vec<Wrapper>>()
-        {
-            for inner in tx
-                .inners
-                .iter()
-                .filter(|tx| tx.was_applied)
-                .cloned()
-                .collect::<Vec<Inner>>()
-            {
-                match &inner.kind {
-                    InnerKind::Transfer(transfer) => {
-                        let mut groups: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-                        for (a, b) in &transfer.targets {
-                            groups
-                                .entry(a.token.to_string())
-                                .or_default()
-                                .push(b.amount().raw_amount().as_u64());
-                        }
-                        for (token, amounts) in groups {
-                            let total: u64 = amounts.iter().sum();
-                            transfers.push(Transfer {
-                                height: self.height,
-                                id: inner.id.clone(),
-                                kind: TransferKind::Native,
-                                token: token.clone(),
-                                amount: total,
-                                accepted: inner.was_applied,
-                            });
-                        }
+            .flat_map(|tx| tx.inners.iter())
+            .filter(|inner| inner.was_applied);
+
+        for inner in applied_inners {
+            let (transfer, kind) = match &inner.kind {
+                InnerKind::Transfer(transfer) => (
+                    transfer,
+                    masp_transfer_kind(transfer).unwrap_or(TransferKind::Native),
+                ),
+                InnerKind::IbcMsgTransfer(IbcMessage::Transfer(msg_transfer)) => {
+                    match &msg_transfer.transfer {
+                        Some(transfer) => (transfer, TransferKind::Ibc),
+                        None => continue,
                     }
-                    InnerKind::IbcMsgTransfer(IbcMessage::Transfer(msg_transfer)) => {
-                        if let Some(transfer) = &msg_transfer.transfer {
-                            let mut groups: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-                            for (a, b) in &transfer.targets {
-                                groups
-                                    .entry(a.token.to_string())
-                                    .or_default()
-                                    .push(b.amount().raw_amount().as_u64());
-                            }
-                            for (token, amounts) in groups {
-                                let total: u64 = amounts.iter().sum();
-                                transfers.push(Transfer {
-                                    height: self.height,
-                                    id: inner.id.clone(),
-                                    kind: TransferKind::Native,
-                                    token: token.clone(),
-                                    amount: total,
-                                    accepted: inner.was_applied,
-                                });
-                            }
-                        }
-                    }
-                    _ => {}
                 }
+                _ => continue,
+            };
+
+            let mut totals: BTreeMap<String, u64> = BTreeMap::new();
+            for (account, amount) in &transfer.targets {
+                *totals.entry(account.token.to_string()).or_default() +=
+                    amount.amount().raw_amount().as_u64();
+            }
+
+            for (token, amount) in totals {
+                transfers.push(Transfer {
+                    height: self.height,
+                    id: inner.id.clone(),
+                    kind: kind.clone(),
+                    token,
+                    amount,
+                    accepted: inner.was_applied,
+                });
             }
         }
+
         transfers
+    }
+}
+
+/// Classify a transfer with respect to the MASP: shielding, unshielding, fully
+/// shielded, or a mix of transparent and shielded parts. Returns `None` for a
+/// plain transparent transfer.
+pub fn masp_transfer_kind(data: &NamadaTransfer) -> Option<TransferKind> {
+    let has_shielded_section = data.shielded_section_hash.is_some();
+    if has_shielded_section && data.sources.is_empty() && data.targets.is_empty() {
+        return Some(TransferKind::Shielded);
+    }
+
+    let (all_sources_are_masp, any_sources_are_masp) =
+        data.sources
+            .iter()
+            .fold((true, false), |(all, any), (acc, _)| {
+                let is_masp = acc.owner.eq(&MASP_ADDRESS);
+                (all && is_masp, any || is_masp)
+            });
+
+    let (all_targets_are_masp, any_targets_are_masp) =
+        data.targets
+            .iter()
+            .fold((true, false), |(all, any), (acc, _)| {
+                let is_masp = acc.owner.eq(&MASP_ADDRESS);
+                (all && is_masp, any || is_masp)
+            });
+
+    match (
+        all_sources_are_masp,
+        any_sources_are_masp,
+        all_targets_are_masp,
+        any_targets_are_masp,
+        has_shielded_section,
+    ) {
+        (true, _, true, _, true) => Some(TransferKind::Shielded),
+        (true, _, _, false, true) => Some(TransferKind::Unshielding),
+        (_, false, true, _, true) => Some(TransferKind::Shielding),
+        (_, false, _, false, false) => None,
+        _ => Some(TransferKind::Mixed),
     }
 }
 
@@ -552,6 +517,19 @@ pub enum TransferKind {
     Mixed,
 }
 
+impl Display for TransferKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransferKind::Ibc => write!(f, "ibc"),
+            TransferKind::Native => write!(f, "native"),
+            TransferKind::Shielding => write!(f, "shielding"),
+            TransferKind::Unshielding => write!(f, "unshielding"),
+            TransferKind::Shielded => write!(f, "shielded"),
+            TransferKind::Mixed => write!(f, "mixed"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Transfer {
     pub height: Height,
@@ -560,11 +538,6 @@ pub struct Transfer {
     pub token: String,
     pub amount: u64,
     pub accepted: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct IbcClient {
-    pub client_id: String,
 }
 
 impl BlockResult {
@@ -664,53 +637,45 @@ impl From<&TendermintBlockResultResponse> for BlockResult {
 
 impl From<TendermintBlockResultResponse> for BlockResult {
     fn from(value: TendermintBlockResultResponse) -> Self {
-        let begin_events = value
-            .begin_block_events
-            .unwrap_or_default()
-            .iter()
-            .map(|event| {
-                let kind = EventKind::from(&event.kind);
-                let raw_attributes =
-                    event
-                        .attributes
-                        .iter()
-                        .fold(BTreeMap::default(), |mut acc, attribute| {
-                            acc.insert(
-                                String::from(attribute.key_str().unwrap()),
-                                String::from(attribute.value_str().unwrap()),
-                            );
-                            acc
-                        });
-                let attributes = TxAttributesType::deserialize(&kind, &raw_attributes);
-                Event { kind, attributes }
-            })
-            .collect::<Vec<Event>>();
-        let end_events = value
-            .end_block_events
-            .unwrap_or_default()
-            .iter()
-            .map(|event| {
-                let kind = EventKind::from(&event.kind);
-                let raw_attributes =
-                    event
-                        .attributes
-                        .iter()
-                        .fold(BTreeMap::default(), |mut acc, attribute| {
-                            acc.insert(
-                                String::from(attribute.key_str().unwrap()),
-                                String::from(attribute.value_str().unwrap()),
-                            );
-                            acc
-                        });
-                let attributes = TxAttributesType::deserialize(&kind, &raw_attributes);
-                Event { kind, attributes }
-            })
-            .collect::<Vec<Event>>();
+        let begin_events = Self::parse_events(value.begin_block_events.unwrap_or_default());
+        let end_events = Self::parse_events(value.end_block_events.unwrap_or_default());
         Self {
             height: value.height.value(),
             begin_events,
             end_events,
         }
+    }
+}
+
+impl BlockResult {
+    /// Turn raw tendermint events into the subset this monitor understands.
+    /// Attributes that are not valid utf-8 are dropped rather than fatal: a
+    /// single odd event should never take the monitor down.
+    fn parse_events(events: Vec<namada_sdk::tendermint::abci::Event>) -> Vec<Event> {
+        events
+            .iter()
+            .map(|event| {
+                let kind = EventKind::from(&event.kind);
+                let raw_attributes =
+                    event
+                        .attributes
+                        .iter()
+                        .fold(BTreeMap::default(), |mut acc, attribute| {
+                            match (attribute.key_str(), attribute.value_str()) {
+                                (Ok(key), Ok(value)) => {
+                                    acc.insert(String::from(key), String::from(value));
+                                }
+                                _ => tracing::warn!(
+                                    "Skipping non utf-8 attribute of a {} event",
+                                    event.kind
+                                ),
+                            }
+                            acc
+                        });
+                let attributes = TxAttributesType::deserialize(&kind, &raw_attributes);
+                Event { kind, attributes }
+            })
+            .collect()
     }
 }
 
@@ -721,37 +686,56 @@ impl TxAttributesType {
     ) -> Option<Self> {
         match event_kind {
             EventKind::Unknown => None,
-            EventKind::Applied => Some(Self::TxApplied(TxApplied {
-                code: attributes
+            // A missing or malformed attribute means the monitor cannot tell
+            // whether the transaction was applied. Report that as unknown
+            // rather than bringing the process down over one event.
+            EventKind::Applied => {
+                let missing = |attribute: &str| {
+                    tracing::warn!("Ignoring a tx/applied event without a usable {}", attribute);
+                    None::<Self>
+                };
+
+                let Some(code) = attributes
                     .get("code")
                     .map(|code| TxEventStatusCode::from(code.as_str()))
-                    .unwrap()
-                    .to_owned(),
-                gas: attributes
+                else {
+                    return missing("code");
+                };
+                let Some(gas) = attributes
                     .get("gas_used")
-                    .map(|gas| u64::from_str(gas).unwrap())
-                    .unwrap()
-                    .to_owned(),
-                hash: attributes
-                    .get("hash")
-                    .map(|hash| hash.to_uppercase())
-                    .unwrap()
-                    .to_owned(),
-                height: attributes
+                    .and_then(|gas| u64::from_str(gas).ok())
+                else {
+                    return missing("gas_used");
+                };
+                let Some(hash) = attributes.get("hash").map(|hash| hash.to_uppercase()) else {
+                    return missing("hash");
+                };
+                let Some(height) = attributes
                     .get("height")
-                    .map(|height| u64::from_str(height).unwrap())
-                    .unwrap()
-                    .to_owned(),
-                batch: attributes
+                    .and_then(|height| u64::from_str(height).ok())
+                else {
+                    return missing("height");
+                };
+                let Some(batch) = attributes
                     .get("batch")
-                    .map(|batch_result| {
-                        let tx_result: TxResult<String> =
-                            serde_json::from_str(batch_result).unwrap();
-                        BatchResults::from(tx_result)
-                    })
-                    .unwrap(),
-                info: attributes.get("info").unwrap().to_owned(),
-            })),
+                    .and_then(|batch| serde_json::from_str::<TxResult<String>>(batch).ok())
+                    .map(BatchResults::from)
+                else {
+                    return missing("batch");
+                };
+                let Some(info) = attributes.get("info").cloned() else {
+                    return missing("info");
+                };
+
+                Some(Self::TxApplied(TxApplied {
+                    code,
+                    gas,
+                    hash,
+                    height,
+                    batch,
+                    info,
+                }))
+            }
         }
     }
 }

@@ -1,9 +1,15 @@
-use std::fmt::Display;
+use std::{fmt::Display, time::Duration};
+
+use crate::shared::alert::{summarize, Alert, Metadata, Severity};
 
 use super::{AppConfig, CheckTrait};
 
 const TX_SECTIONS_CHECK_ID: &str = "tx_sections_check";
 const TX_BATCH_CHECK_ID: &str = "tx_batch_check";
+
+/// Oversized transactions tend to arrive in bursts. Report a block's offenders
+/// together, then stay quiet for a while.
+const DAMPENING: Duration = Duration::from_secs(60 * 15);
 
 pub struct TxCheck {
     pub threshold_sections: u64,
@@ -22,49 +28,72 @@ impl TxCheck {
 
 #[async_trait::async_trait]
 impl CheckTrait for TxCheck {
-    async fn check(&self, states: &super::State) -> Vec<crate::shared::alert::Alert> {
-        let last_block = states.last_block();
+    async fn check(&self, states: &super::State) -> Vec<Alert> {
+        let Some(last_block) = states.last_block() else {
+            return Vec::new();
+        };
 
-        let mut alerts = Vec::new();
+        let mut wide_sections = Vec::new();
+        let mut large_batches = Vec::new();
+
         for transaction in &last_block.block.transactions {
             if transaction.total_sections
                 > self.threshold_sections * transaction.inners.len() as u64
             {
-                alerts.push(crate::shared::alert::Alert {
-                    check_id: TX_SECTIONS_CHECK_ID.to_string(),
-                    title: "Transaction sections limit exceeded".to_string(),
-                    description: format!(
-                        "Transaction {} has {} sections",
-                        transaction.id, transaction.total_sections,
-                    ),
-                    metadata: crate::shared::alert::Metadata {
-                        block_height: Some(last_block.block.height as u32),
-                        tx_id: Some(transaction.id.clone()),
-                    },
-                    severity: crate::shared::alert::Severity::Low,
-                    trigger_after: None,
-                    continous: self.is_continous(),
-                });
+                wide_sections.push(format!(
+                    "{} has {} sections over {} inner transactions",
+                    transaction.id,
+                    transaction.total_sections,
+                    transaction.inners.len()
+                ));
             }
 
             if transaction.inners.len() as u64 > self.threshold_batch {
-                alerts.push(crate::shared::alert::Alert {
-                    check_id: TX_BATCH_CHECK_ID.to_string(),
-                    title: "Transaction batch limit exceeded".to_string(),
-                    description: format!(
-                        "Transaction {} has {} inner transactions",
-                        transaction.id,
-                        transaction.inners.len(),
-                    ),
-                    metadata: crate::shared::alert::Metadata {
-                        block_height: Some(last_block.block.height as u32),
-                        tx_id: Some(transaction.id.clone()),
-                    },
-                    severity: crate::shared::alert::Severity::Low,
-                    trigger_after: None,
-                    continous: self.is_continous(),
-                });
+                large_batches.push(format!(
+                    "{} batches {} inner transactions",
+                    transaction.id,
+                    transaction.inners.len()
+                ));
             }
+        }
+
+        let height = last_block.block.height;
+        let mut alerts = Vec::new();
+
+        if !wide_sections.is_empty() {
+            alerts.push(Alert {
+                check_id: TX_SECTIONS_CHECK_ID.to_string(),
+                title: "Transaction sections limit exceeded".to_string(),
+                description: format!(
+                    "*{}* transactions in block {} exceeded the section limit of {} per inner transaction:{}",
+                    wide_sections.len(),
+                    height,
+                    self.threshold_sections,
+                    summarize(&wide_sections)
+                ),
+                metadata: Metadata::new(Some(height as u32), None),
+                severity: Severity::Low,
+                trigger_after: Some(DAMPENING),
+                continous: self.is_continous(),
+            });
+        }
+
+        if !large_batches.is_empty() {
+            alerts.push(Alert {
+                check_id: TX_BATCH_CHECK_ID.to_string(),
+                title: "Transaction batch limit exceeded".to_string(),
+                description: format!(
+                    "*{}* transactions in block {} exceeded the batch limit of {}:{}",
+                    large_batches.len(),
+                    height,
+                    self.threshold_batch,
+                    summarize(&large_batches)
+                ),
+                metadata: Metadata::new(Some(height as u32), None),
+                severity: Severity::Low,
+                trigger_after: Some(DAMPENING),
+                continous: self.is_continous(),
+            });
         }
 
         alerts

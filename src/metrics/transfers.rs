@@ -5,18 +5,18 @@
 /// ### Example
 /// ```
 /// # HELP transfer_amount Token transfer amount
-/// # TYPE transfer_amount gauge
-/// transfer_amount{token=“NAM”} 5000
+/// # TYPE transfer_amount counter
+/// transfer_amount{token="NAM",kind="native"} 5000
 /// ```
 use crate::state::State;
 use anyhow::Result;
-use prometheus_exporter::prometheus::{GaugeVec, Opts, Registry};
+use prometheus_exporter::prometheus::{CounterVec, Opts, Registry};
 
 use super::MetricTrait;
 
 pub struct Transfers {
-    /// Transfer amount by token and epoch
-    pub transfer_amount: GaugeVec,
+    /// Cumulative transferred amount by token and transfer kind
+    pub transfer_amount: CounterVec,
 }
 
 impl MetricTrait for Transfers {
@@ -26,12 +26,10 @@ impl MetricTrait for Transfers {
     }
 
     fn update(&self, state: &State) {
-        let last_state = state.last_block();
-
         for transfer in state.get_all_transfers() {
             self.transfer_amount
-                .with_label_values(&[&transfer.token, &last_state.block.epoch.to_string()])
-                .add(transfer.amount as f64);
+                .with_label_values(&[&transfer.token, &transfer.kind.to_string()])
+                .inc_by(transfer.amount as f64);
         }
     }
 }
@@ -39,7 +37,7 @@ impl MetricTrait for Transfers {
 impl Default for Transfers {
     fn default() -> Self {
         let transfer_amount_opts = Opts::new("transfer_amount", "Token transfer amount");
-        let transfer_amount = GaugeVec::new(transfer_amount_opts, &["token", "epoch"])
+        let transfer_amount = CounterVec::new(transfer_amount_opts, &["token", "kind"])
             .expect("unable to create transaction transfer amount");
         Self { transfer_amount }
     }

@@ -6,13 +6,22 @@ block_endpoint = "/blocks/{block_height}"
 [chain]
 block_time = 9
 block_time_max_deviation = 0.1
+# Seconds without a new block before the chain is considered halted.
 halt_threshold = 120
+# Optional. Multiple of block_time the windowed average may reach before alerting.
+avg_block_time_factor = 1.2
+# Optional. How many recent blocks the average block time is computed over.
+block_time_lookback = 50
+# Optional. How far the monitor may fall behind the chain head, in blocks, before
+# alerting. Also suppresses halt detection while backfilling.
+max_lag_blocks = 10
 
 [pos]
 mininimum_one_third_validators = 2
 mininimum_two_third_validators = 4
 bond_increase_threshold = 0.1
 unbond_increase_threshold = 0.1
+# Tolerated *drop* in the consensus set: 0.1 alerts once a tenth are gone.
 consensus_threshold = 0.1
 threshold_missed_votes = 0.1
 
@@ -21,11 +30,35 @@ threshold_sections = 5
 threshold_batch = 5
 gas_limit_threshold = 0.5
 
-[[token]]
+# Optional. Tuning of the IBC checks. Distinct from the [[ibcs]] entries below,
+# which list the channels to watch.
+[ibc]
+client_expiration_threshold = 172800  # 2 days, in seconds
+poll_interval = 300                   # seconds between IBC client queries
+supply_limit_threshold = 0.80         # fraction of the mint limit
+
+# Optional. Every check runs unless it is explicitly disabled here.
+[checks]
+block = true
+fee = true
+gas = true
+governance = true
+halt = true
+ibc = true
+ibc_limit = true
+lag = true
+pos = true
+slashes = true
+transfer_limit = true
+tx = true
+unknown_tx = true
+validator_state = true
+
+[[tokens]]
 alias = "nam"
 token = "tnam1...."
 fee_threshold = 0.0
-transfer_limit = 0
+transfer_threshold = 0
 
 [slack]
 slack_webhook = "example"
@@ -33,7 +66,7 @@ channel = "example"
 mentions = ["@handle"]
 minimum_severity = "Low"
 
-[[ibc]]
+[[ibcs]]
 alias = "example"
 channel = 13
 connection = 15

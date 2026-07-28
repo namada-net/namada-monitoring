@@ -27,10 +27,15 @@ impl MetricTrait for Epoch {
     }
 
     fn update(&self, state: &State) {
-        let last_state = state.last_block();
+        let Some(last_state) = state.last_block() else {
+            return;
+        };
 
+        // A counter cannot go backwards; saturate rather than underflow when
+        // the monitor is restarted at an earlier height.
         let latest_epoch = self.epoch.get();
-        self.epoch.inc_by(last_state.block.epoch - latest_epoch);
+        self.epoch
+            .inc_by(last_state.block.epoch.saturating_sub(latest_epoch));
     }
 }
 

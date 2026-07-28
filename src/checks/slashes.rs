@@ -17,7 +17,9 @@ pub struct SlashCheck {}
 #[async_trait::async_trait]
 impl CheckTrait for SlashCheck {
     async fn check(&self, state: &State) -> Vec<Alert> {
-        let last_state = state.last_block();
+        let Some(last_state) = state.last_block() else {
+            return Vec::new();
+        };
 
         last_state.block.block.evidence.iter().map(|evidence| {
             match evidence {
@@ -43,7 +45,7 @@ impl CheckTrait for SlashCheck {
                             Some(last_state.block.block.header.height.value() as u32),
                             None
                         ),
-                        severity: Severity::Low,
+                        severity: Severity::Critical,
                         check_id: SLASHES_CHECK_ID.to_string(),
                         trigger_after: None,
                         continous: self.is_continous(),
@@ -77,7 +79,7 @@ impl CheckTrait for SlashCheck {
                             Some(last_state.block.block.header.height.value() as u32),
                             None
                         ),
-                        severity: Severity::Low,
+                        severity: Severity::Critical,
                         check_id: SLASHES_CHECK_ID.to_string(),
                         trigger_after: None,
                         continous: self.is_continous()

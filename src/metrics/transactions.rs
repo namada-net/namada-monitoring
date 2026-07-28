@@ -43,9 +43,9 @@
 /// ```
 /// # HELP transaction_kind Transaction kind count per epoch
 /// # TYPE transaction_kind counter
-/// transaction_kind{kind="transfer", epoch="256", failed="false"} 120
-/// transaction_kind{kind="bond", epoch="256", failed="false"} 15
-/// transaction_kind{kind="vote_proposal", epoch="256", failed="true"} 3
+/// transaction_kind{kind="transfer", failed="false"} 120
+/// transaction_kind{kind="bond", failed="false"} 15
+/// transaction_kind{kind="vote_proposal", failed="true"} 3
 /// ```
 use crate::state::State;
 use anyhow::Result;
@@ -71,16 +71,17 @@ impl MetricTrait for Transactions {
     }
 
     fn update(&self, state: &State) {
-        let last_state = state.last_block();
+        let Some(last_state) = state.last_block() else {
+            return;
+        };
 
-        let epoch = last_state.block.epoch.to_string();
         for tx in &last_state.block.transactions {
             self.transaction_batch_size.observe(tx.inners.len() as f64);
             for inner in &tx.inners {
                 let inner_kind = inner.kind.to_string();
                 let failed = !inner.was_applied;
                 self.transaction_kind
-                    .with_label_values(&[&inner_kind, &failed.to_string(), &epoch])
+                    .with_label_values(&[&inner_kind, &failed.to_string()])
                     .inc();
             }
         }
@@ -97,11 +98,9 @@ impl Default for Transactions {
         let transaction_batch_size = Histogram::with_opts(transaction_batch_size_opts)
             .expect("unable to create histogram transaction batch size");
 
-        let transaction_kind_opts =
-            Opts::new("transaction_kind", "Transaction kind count per epoch");
-        let transaction_kind =
-            IntCounterVec::new(transaction_kind_opts, &["kind", "failed", "epoch"])
-                .expect("unable to create int counter for transaction kinds");
+        let transaction_kind = Opts::new("transaction_kind", "Transaction kind count");
+        let transaction_kind = IntCounterVec::new(transaction_kind, &["kind", "failed"])
+            .expect("unable to create int counter for transaction kinds");
 
         Self {
             transaction_batch_size,

@@ -1,9 +1,9 @@
-FROM lukemathwalker/cargo-chef:latest-rust-1.85.1 AS planner
+FROM lukemathwalker/cargo-chef:latest-rust-1.95.0 AS planner
 WORKDIR /app
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-FROM lukemathwalker/cargo-chef:latest-rust-1.85.1 AS cacher
+FROM lukemathwalker/cargo-chef:latest-rust-1.95.0 AS cacher
 WORKDIR /app
 COPY --from=planner /app/recipe.json recipe.json
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --assume-yes \
@@ -18,7 +18,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-instal
     && apt-get clean
 RUN cargo chef cook --release --recipe-path recipe.json
 
-FROM docker.io/rust:1.85.1 AS builder
+FROM docker.io/rust:1.95.0 AS builder
 WORKDIR /app
 COPY . .
 COPY --from=cacher /app/target /app/target

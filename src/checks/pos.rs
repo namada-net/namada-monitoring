@@ -3,11 +3,15 @@ use std::{fmt::Display, time::Duration};
 use super::{AppConfig, CheckTrait};
 
 const POS_ONE_THIRD_CHECK_ID: &str = "pos_one_third_check";
-const POS_TWO_THIRD_CHECK_ID: &str = "pos_one_third_check";
+const POS_TWO_THIRD_CHECK_ID: &str = "pos_two_third_check";
 const POS_BONDS_CHECK_ID: &str = "pos_bonds_check";
 const POS_UNBONDS_CHECK_ID: &str = "pos_unbonds_check";
 const POS_CONSENSUS_CHECK_ID: &str = "pos_consensus_check";
 const POS_MISSED_VOTES_CHECK_ID: &str = "pos_missed_votes_check";
+
+/// Missed votes are evaluated on every block. Without dampening a validator
+/// outage would emit an alert every few seconds for as long as it lasts.
+const MISSED_VOTES_DAMPENING: Duration = Duration::from_secs(60 * 15);
 
 pub struct PoSCheck {
     mininimum_one_third_validators: u64,
@@ -35,17 +39,32 @@ impl PoSCheck {
 #[async_trait::async_trait]
 impl CheckTrait for PoSCheck {
     async fn check(&self, state: &super::State) -> Vec<crate::shared::alert::Alert> {
-        let last_state = state.last_block();
-        let prev_state = state.prev_block();
-
-        let one_third_validators = state
-            .validators_with_voting_power(1.0 / 3.0)
-            .expect("Should be able to get validators");
-        let two_third_validators = state
-            .validators_with_voting_power(2.0 / 3.0)
-            .expect("Should be able to get validators");
+        let (Some(last_state), Some(prev_state)) = (state.last_block(), state.prev_block()) else {
+            return Vec::new();
+        };
 
         let mut alerts = Vec::new();
+
+        let (one_third_validators, two_third_validators) = match (
+            state.validators_with_voting_power(1.0 / 3.0),
+            state.validators_with_voting_power(2.0 / 3.0),
+        ) {
+            (Ok(one_third), Ok(two_third)) => (one_third, two_third),
+            (one_third, two_third) => {
+                // An empty or unreadable validator set is a query problem, not a
+                // centralization problem: skip rather than alert on garbage.
+                tracing::warn!(
+                    "Skipping voting power distribution checks: {:?} {:?}",
+                    one_third.err(),
+                    two_third.err()
+                );
+                (
+                    self.mininimum_one_third_validators,
+                    self.mininimum_two_third_validators,
+                )
+            }
+        };
+
         if one_third_validators < self.mininimum_one_third_validators {
             alerts.push(crate::shared::alert::Alert {
                 check_id: POS_ONE_THIRD_CHECK_ID.to_string(),
@@ -82,10 +101,14 @@ impl CheckTrait for PoSCheck {
             });
         }
 
-        let current_consensus_validators = last_state.consensus_validators().len() as f64;
-        let prev_consensus_validators = prev_state.consensus_validators().len() as f64;
+        let current_consensus_validators = last_state.total_consensus_validators() as f64;
+        let prev_consensus_validators = prev_state.total_consensus_validators() as f64;
 
-        if current_consensus_validators < prev_consensus_validators * self.consensus_threshold {
+        // consensus_threshold is the tolerated *drop*: 0.1 means alert once a
+        // tenth of the consensus set is gone. Comparing against
+        // `prev * threshold` instead would only fire after a 90% collapse.
+        let consensus_floor = prev_consensus_validators * (1.0 - self.consensus_threshold);
+        if current_consensus_validators < consensus_floor {
             alerts.push(crate::shared::alert::Alert {
                 check_id: POS_CONSENSUS_CHECK_ID.to_string(),
                 title: "Low consensus validators".to_string(),
@@ -130,7 +153,7 @@ impl CheckTrait for PoSCheck {
                 check_id: POS_UNBONDS_CHECK_ID.to_string(),
                 title: "High unbond increase".to_string(),
                 description: format!(
-                    "Bonds increased from {} to {} in epoch {}",
+                    "Unbonds increased from {} to {} in epoch {}",
                     prev_unbonds, current_unbonds, last_state.block.epoch
                 ),
                 metadata: crate::shared::alert::Metadata {
@@ -143,13 +166,12 @@ impl CheckTrait for PoSCheck {
             });
         }
 
-        let total_validators = last_state.consensus_validators().len();
-        let total_votes = last_state.block.block.last_commit.unwrap().signatures.len();
-
-        let missed_votes_percentage = if total_validators > 0 {
-            1.0 - (total_votes as f64 / total_validators as f64)
-        } else {
-            0.0
+        // The commit lists one entry per validator, absent ones included, so the
+        // number of entries is the expected vote count and only the entries
+        // flagged as commits are actual votes.
+        let missed_votes_percentage = match last_state.commit_votes() {
+            Some((signed, expected)) if expected > 0 => 1.0 - (signed as f64 / expected as f64),
+            _ => 0.0,
         };
 
         if missed_votes_percentage > self.threshold_missed_votes {
@@ -166,7 +188,7 @@ impl CheckTrait for PoSCheck {
                     tx_id: None,
                 },
                 severity: crate::shared::alert::Severity::Medium,
-                trigger_after: None,
+                trigger_after: Some(MISSED_VOTES_DAMPENING),
                 continous: self.is_continous(),
             });
         }

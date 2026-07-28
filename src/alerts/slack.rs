@@ -173,10 +173,6 @@ impl AlertTrait for SlackAlert {
         }
     }
 
-    fn get_block_explorer(&self) -> BlockExplorer {
-        self.block_explorer.clone()
-    }
-
     fn get_id(&self) -> String {
         "slack".to_string()
     }

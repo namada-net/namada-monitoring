@@ -34,10 +34,12 @@ async fn main() -> anyhow::Result<()> {
         env!("VERGEN_GIT_SHA")
     );
 
-    rlimit::increase_nofile_limit(10240).unwrap();
-    rlimit::increase_nofile_limit(u64::MAX).unwrap();
-
-    let tokens = config.get_config().tokens();
+    // Best effort: the monitor keeps a connection pool open per RPC endpoint,
+    // but a low limit is not fatal.
+    match rlimit::increase_nofile_limit(u64::MAX) {
+        Ok(limit) => tracing::debug!("Open file limit raised to {}", limit),
+        Err(err) => tracing::warn!("Could not raise the open file limit: {}", err),
+    }
 
     tracing::info!("{:#?}", config.get_config());
 
@@ -56,13 +58,13 @@ async fn main() -> anyhow::Result<()> {
         _ = RetryIf::spawn(
             retry_strategy.clone(),
             || async {
-                tracing::info!("Fetching block at height {}...", index);
+                tracing::debug!("Fetching block at height {}...", index);
                 let mut manager = manager.write().await;
 
                 let continous_alerts = manager.checks.run_continous_checks(&manager.state).await;
 
                 manager
-                    .update_next_state(index as u64, tokens.clone())
+                    .update_next_state(index as u64)
                     .await
                     .into_retry_error()?;
 
@@ -98,7 +100,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn notify(err: &std::io::Error, duration: std::time::Duration) {
-    tracing::info!("Error {err:?} occurred at {duration:?}");
+    // Waiting for the chain to produce the next block is the steady state, not
+    // something worth warning about on every poll.
+    if err.kind() == std::io::ErrorKind::WouldBlock {
+        tracing::debug!("{err}, waiting");
+    } else {
+        tracing::warn!("Retrying after error: {err} (elapsed {duration:?})");
+    }
 }
 
 fn retry_strategy(sleep_for: u64) -> FixedInterval {

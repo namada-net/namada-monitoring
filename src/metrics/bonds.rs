@@ -14,15 +14,15 @@
 /// ```
 use crate::state::State;
 use anyhow::Result;
-use prometheus_exporter::prometheus::{GaugeVec, Opts, Registry};
+use prometheus_exporter::prometheus::{Gauge, Opts, Registry};
 
 use super::MetricTrait;
 
 pub struct Bonds {
     /// Bonds
-    bonds: GaugeVec,
+    bonds: Gauge,
     /// Unbonds
-    unbonds: GaugeVec,
+    unbonds: Gauge,
 }
 
 impl MetricTrait for Bonds {
@@ -33,24 +33,22 @@ impl MetricTrait for Bonds {
     }
 
     fn update(&self, state: &State) {
-        let last_state = state.last_block();
+        let Some(last_state) = state.last_block() else {
+            return;
+        };
 
-        self.bonds
-            .with_label_values(&[&last_state.block.epoch.to_string()])
-            .set(last_state.bonds as f64);
-        self.unbonds
-            .with_label_values(&[&last_state.block.epoch.to_string()])
-            .set(last_state.unbonds as f64);
+        self.bonds.set(last_state.bonds as f64);
+        self.unbonds.set(last_state.unbonds as f64);
     }
 }
 
 impl Default for Bonds {
     fn default() -> Self {
-        let bonds_opts = Opts::new("bonds", "Total bonds per epoch");
-        let unbonds_opts = Opts::new("unbonds", "Total unbonds per epoch");
+        let bonds_opts = Opts::new("bonds", "Total active bonds at the pipeline epoch");
+        let unbonds_opts = Opts::new("unbonds", "Total active unbonds at the pipeline epoch");
         Self {
-            bonds: GaugeVec::new(bonds_opts, &["epoch"]).expect("unable to create bonds"),
-            unbonds: GaugeVec::new(unbonds_opts, &["epoch"]).expect("unable to create unbond"),
+            bonds: Gauge::with_opts(bonds_opts).expect("unable to create bonds"),
+            unbonds: Gauge::with_opts(unbonds_opts).expect("unable to create unbond"),
         }
     }
 }

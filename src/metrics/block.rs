@@ -35,12 +35,16 @@ impl MetricTrait for Block {
     }
 
     fn update(&self, state: &State) {
-        let last_state = state.last_block();
-        let prev_state = state.prev_block();
+        let (Some(last_state), Some(prev_state)) = (state.last_block(), state.prev_block()) else {
+            return;
+        };
 
+        // A counter cannot go backwards; saturate rather than underflow when
+        // the monitor is restarted at an earlier height.
         let block_height = last_state.block.height;
         let latest_block = self.block_height.get();
-        self.block_height.inc_by(block_height - latest_block);
+        self.block_height
+            .inc_by(block_height.saturating_sub(latest_block));
 
         let process_time = last_state.block.timestamp - prev_state.block.timestamp;
         self.block_time.observe(process_time as f64);

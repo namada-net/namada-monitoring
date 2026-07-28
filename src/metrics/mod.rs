@@ -94,10 +94,6 @@ impl MetricsExporter {
 
         Ok(())
     }
-    pub fn start_exporter_with(&self) -> anyhow::Result<()> {
-        self.start_exporter()
-            .context("can not start exporter with state")
-    }
 
     pub fn update(&self, state: &State) {
         for metric in &self.metrics {

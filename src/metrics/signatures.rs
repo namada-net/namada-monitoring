@@ -4,54 +4,43 @@
 ///
 /// ### Example
 /// ```text
-/// # HELP signatures Number of validators that signed the block
-/// # TYPE signatures histogram
-/// signatures_bucket{le="0.005"} 0
-/// signatures_bucket{le="0.01"} 0
-/// signatures_bucket{le="0.025"} 0
-/// signatures_bucket{le="0.05"} 0
-/// signatures_bucket{le="0.1"} 0
-/// signatures_bucket{le="0.25"} 0
-/// signatures_bucket{le="0.5"} 0
-/// signatures_bucket{le="1"} 0
-/// signatures_bucket{le="2.5"} 0
-/// signatures_bucket{le="5"} 0
-/// signatures_bucket{le="10"} 0
-/// signatures_bucket{le="+Inf"} 0
-/// signatures_sum 0
-/// signatures_count 0
+/// # HELP block_signatures Number of validators that signed the block
+/// # TYPE block_signatures gauge
+/// block_signatures 98
+/// # HELP block_expected_signatures Number of validators expected to sign
+/// # TYPE block_expected_signatures gauge
+/// block_expected_signatures 100
 /// ```
 use crate::state::State;
 use anyhow::Result;
-use prometheus_exporter::prometheus::{GaugeVec, Opts, Registry};
+use prometheus_exporter::prometheus::{Gauge, Opts, Registry};
 
 use super::MetricTrait;
 
 pub struct Signatures {
-    /// GaugeVec to track the number of signatures in the lastest block height
-    signatures: GaugeVec,
+    /// Validators that signed the commit carried by the latest block
+    signatures: Gauge,
+    /// Size of the commit's validator set, signers and non-signers alike
+    expected_signatures: Gauge,
 }
 
 impl MetricTrait for Signatures {
     fn register(&self, registry: &Registry) -> Result<()> {
         registry.register(Box::new(self.signatures.clone()))?;
+        registry.register(Box::new(self.expected_signatures.clone()))?;
         Ok(())
     }
 
     fn update(&self, state: &State) {
-        let last_state = state.last_block();
+        // The commit holds one entry per validator, absent ones included, so
+        // only the entries flagged as commits are real signatures.
+        let Some((signed, expected)) = state.last_block().and_then(|block| block.commit_votes())
+        else {
+            return;
+        };
 
-        let total_signatures = last_state
-            .block
-            .block
-            .last_commit()
-            .clone()
-            .unwrap()
-            .signatures
-            .len();
-        self.signatures
-            .with_label_values(&[&last_state.block.height.to_string()])
-            .set(total_signatures as f64);
+        self.signatures.set(signed as f64);
+        self.expected_signatures.set(expected as f64);
     }
 }
 
@@ -59,11 +48,17 @@ impl Default for Signatures {
     fn default() -> Self {
         let signature_opts = Opts::new(
             "block_signatures",
-            "Number of validators signatures per block",
+            "Number of validators that signed the latest block's commit",
+        );
+        let expected_opts = Opts::new(
+            "block_expected_signatures",
+            "Number of validators expected to sign the latest block's commit",
         );
         Self {
-            signatures: GaugeVec::new(signature_opts, &["height"])
+            signatures: Gauge::with_opts(signature_opts)
                 .expect("unable to create signatures metric"),
+            expected_signatures: Gauge::with_opts(expected_opts)
+                .expect("unable to create expected signatures metric"),
         }
     }
 }

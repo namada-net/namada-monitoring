@@ -56,3 +56,27 @@ impl Metadata {
         }
     }
 }
+
+/// Number of offending items spelled out in an aggregated alert before the rest
+/// are summarised as a count.
+const MAX_LISTED_ENTRIES: usize = 10;
+
+/// Render the body of an alert that covers several offending items at once.
+///
+/// Per-transaction checks can match many times in a single block. Sending one
+/// message per match floods the alert channel and gets rate limited, so the
+/// matches of a block are reported together.
+pub fn summarize(entries: &[String]) -> String {
+    let listed = entries
+        .iter()
+        .take(MAX_LISTED_ENTRIES)
+        .map(|entry| format!("\n  - {}", entry))
+        .collect::<String>();
+
+    match entries.len().checked_sub(MAX_LISTED_ENTRIES) {
+        Some(remaining) if remaining > 0 => {
+            format!("{}\n  - and {} more", listed, remaining)
+        }
+        _ => listed,
+    }
+}

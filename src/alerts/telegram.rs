@@ -32,6 +32,8 @@ impl AlertTrait for TelegramAlert {
         let description = alert.description.clone();
         let metadata = alert.metadata.clone();
 
+        // MarkdownV2 links are `[text](url)`; the Slack `<url|text>` form would
+        // be rendered verbatim.
         let message = format!(
             "*{title} - {network}*\n\
             {description}.\n\
@@ -40,14 +42,13 @@ impl AlertTrait for TelegramAlert {
             title = title,
             description = description,
             height = metadata
-                .clone()
                 .block_height
-                .map(|h| format!("<{}|{}>", block_explorer.get_block_url(h), h))
+                .map(|h| format!("[{}]({})", h, block_explorer.get_block_url(h)))
                 .unwrap_or_else(|| "N/A".to_string()),
             transaction = metadata
-                .clone()
                 .tx_id
-                .map(|tx| format!("<{}|{}>", block_explorer.get_tx_url(&tx), tx))
+                .as_ref()
+                .map(|tx| format!("[{}]({})", tx, block_explorer.get_tx_url(tx)))
                 .unwrap_or_else(|| "N/A".to_string()),
             network = self.network_id,
         );
@@ -85,18 +86,14 @@ impl AlertTrait for TelegramAlert {
             Ok(response) if response.ok => return Ok(()),
             Ok(response) => {
                 return Err(format!(
-                    "Failed to send slack alert, status: {}",
+                    "Failed to send telegram alert, status: {}",
                     response.description.unwrap_or_default()
                 ));
             }
             Err(err) => {
-                return Err(format!("Failed to send slack alert: {}", err));
+                return Err(format!("Failed to send telegram alert: {}", err));
             }
         }
-    }
-
-    fn get_block_explorer(&self) -> BlockExplorer {
-        self.block_explorer.clone()
     }
 
     fn get_id(&self) -> String {

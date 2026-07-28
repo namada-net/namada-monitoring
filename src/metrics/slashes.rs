@@ -22,12 +22,12 @@
 /// ```
 use crate::state::State;
 use anyhow::Result;
-use prometheus_exporter::prometheus::{GaugeVec, Opts, Registry};
+use prometheus_exporter::prometheus::{Gauge, Opts, Registry};
 
 use super::MetricTrait;
 
 pub struct Slashes {
-    slashes: GaugeVec,
+    slashes: Gauge,
 }
 
 impl MetricTrait for Slashes {
@@ -37,21 +37,20 @@ impl MetricTrait for Slashes {
     }
 
     fn update(&self, state: &State) {
-        let last_state = state.last_block();
+        let Some(last_state) = state.last_block() else {
+            return;
+        };
 
         let total_slashes = last_state.block.block.evidence.iter().len();
-        self.slashes
-            .with_label_values(&[&last_state.block.epoch.to_string()])
-            .set(total_slashes as f64);
+        self.slashes.set(total_slashes as f64);
     }
 }
 
 impl Default for Slashes {
     fn default() -> Self {
-        let slashes_opts = Opts::new("slashes", "Number of slashes per epoch");
+        let slashes_opts = Opts::new("slashes", "Number of evidences in the latest block");
         Self {
-            slashes: GaugeVec::new(slashes_opts, &["epoch"])
-                .expect("unable to create slashes metric"),
+            slashes: Gauge::with_opts(slashes_opts).expect("unable to create slashes metric"),
         }
     }
 }
