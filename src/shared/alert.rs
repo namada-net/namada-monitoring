@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -70,8 +71,10 @@ pub fn summarize(entries: &[String]) -> String {
     let listed = entries
         .iter()
         .take(MAX_LISTED_ENTRIES)
-        .map(|entry| format!("\n  - {}", entry))
-        .collect::<String>();
+        .fold(String::new(), |mut acc, entry| {
+            let _ = write!(acc, "\n  - {}", entry);
+            acc
+        });
 
     match entries.len().checked_sub(MAX_LISTED_ENTRIES) {
         Some(remaining) if remaining > 0 => {

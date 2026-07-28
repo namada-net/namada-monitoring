@@ -9,7 +9,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --assume-yes \
     libprotobuf-dev \
     build-essential \
-    clang-tools-16 \
+    clang-tools \
     git \
     libssl-dev \
     pkg-config \
@@ -25,7 +25,7 @@ COPY --from=cacher /app/target /app/target
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --assume-yes \
     libprotobuf-dev \
     build-essential \
-    clang-tools-16 \
+    clang-tools \
     git \
     libssl-dev \
     pkg-config \

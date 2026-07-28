@@ -1,4 +1,4 @@
-RUST_STABLE := "1.85.1"
+RUST_STABLE := "1.95.0"
 RUST_NIGTHLY := "nightly"
 
 devs:
@@ -20,8 +20,11 @@ fmt:
 fmt-check:
     cargo fmt --all --check
     
+# CI installs the toolchain with actions-rust-lang/setup-rust-toolchain, which
+# sets RUSTFLAGS=-D warnings. Deny them here too so a local run fails on the
+# same lints CI does.
 clippy:
-    cargo clippy
+    cargo clippy --all-targets -- -D warnings
 
 clippy-fix:
     cargo clippy --all --fix --allow-dirty --allow-staged
